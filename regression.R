@@ -1,6 +1,5 @@
 #### PREVALENCE ESTIMATES ####
 
-
 #### SETUP ####
 
 #### * Install packages ####
@@ -18,6 +17,9 @@ library(lmtest)
 library(survey)
 library(binom)
 library(dplyr)
+library(ggplot2)
+library(VIM)
+library(mice)
 
 # detach("arm", unload = TRUE) # arm package interferes with dplyr select function
 
@@ -53,7 +55,6 @@ colour6f <- "#FF2A0D"
 #### * Create base dataframe ####
 
 df <- dfe %>%
-  subset(eligible_rec %in% 1) %>%
   select(individual_id,
          cluster_num, 
          casedef_who, casedef_inc_trace, casedef_exc_trace,
@@ -63,7 +64,7 @@ df <- dfe %>%
          symptom_cough, symptom_cough_prolonged, symptom_fever, symptom_weightloss, symptom_nightsweat, symptomscreen, 
          eligible_rec, screen_pos,
          radscore, cxr_abnormality_score, cxr_finding,
-         res_xpert_a, res_xpert_b, res_xpert_binary, res_culture_a,
+         res_xpert_a, res_xpert_b, res_xpert_binary, res_culture_a, cd_culture,
          reg)
 
 
@@ -87,21 +88,22 @@ cluster_sizes <- table(df$cluster_num)
 total_population <- nrow(df)
 
 # Create a weight variable as the total study population size divided by the cluster size
-df$weight_cluster <- total_population / cluster_sizes[df$cluster_num]
+df <- df %>%
+  mutate(weight_cluster = total_population / cluster_sizes[as.character(cluster_num)])
 
 
 
 #### * Create weights for group combos (for Model 3) ####
 
-# Count N for each combination of cluster, age group, and sex - eligible population (N)
+# Count N for each combination of cluster, age group, and gender - eligible population (N)
 eligible_count <- df %>%
-  subset(eligible_rec %in% 1) %>%
+  filter(eligible_rec == 1) %>%
   group_by(cluster_num, agegp10, gender) %>%
   summarise(N = n(), .groups = 'drop')
 
-# Count n for each combination of cluster, age group, and sex - survey participants (n)
+# Count n for each combination of cluster, age group, and gender - survey participants (n)
 participant_count <- df %>%
-  subset(reg %in% 1) %>%
+  filter(reg == 1) %>%
   group_by(cluster_num, agegp10, gender) %>%
   summarise(n = n(), .groups = 'drop')
 
@@ -113,6 +115,7 @@ df <- df %>%
          weight_group = ifelse(n == 0, 0, N / n)) # Set weight to 0 if n is 0
 
 rm(eligible_count, participant_count)
+
 
 
 #### * Combine cluster size and group weights (Model 3) ####
@@ -127,399 +130,66 @@ rm(cen, cen_hh, cen_in, clusters, dfd, int, lab, pop_agesex, pop_aldeia, rad, re
 
 
 
-####   CLUSTER LEVEL ANALYSIS   ####
-
-#### Crude Prevalence ####
-
-
-#### * Results table ####
-
-# Create dataframe for cluster level analysis results
-a <- c("Cases", "Prevalence", "Standard_dev", "Standard_error", "Lower_95", "Upper_95")
-
-
-# Urban
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(geoclass %in% "Urban") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-b <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Rural
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(geoclass %in% "Rural") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-c <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Male
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(gender %in% "Male") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-d <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Female
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(gender %in% "Female") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-e <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Agegp10 == "15-24y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "15-24") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-f <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Agegp10 == "25-34y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "25-34") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-g <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-
-# Agegp10 == "35-44y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "35-44") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-h <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Agegp10 == "45-54y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "45-54") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-i <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Agegp10 == "55-64y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "55-64") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-j <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-# Agegp10 == "65+y"
-
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  subset(agegp10 %in% "65+") %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-k <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-
-# Total
-
-# Create dataframe for cluster level analysis
-df1 <- df %>%
-  subset(!is.na(case)) %>%
-  select(cluster_num, geoclass, case) %>% 
-  mutate(n = 1) %>%
-  group_by(cluster_num, geoclass) %>%
-  summarize(sum_case = sum(case), sum_n = sum(n)) %>%
-  mutate(rate = sum_case / sum_n * 100000)
-
-
-# Number of cases
-ca_cases <- sum(df1$sum_case)
-
-# Mean prevalence
-ca_mean <- mean(df1$rate)
-
-# Standard deviation
-ca_stdev <- sd(df1$rate)
-
-# Standard error
-ca_se <- ca_stdev / sqrt(50)
-
-# 95% confidence limits of mean prevalence
-ca_95LL <- ca_mean - (ca_se * 2)
-ca_95UL <- ca_mean + (ca_se * 2)
-
-l <- c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL)
-
-
-
-# Join results into one dataframe
-
-Urban <- round(data.frame(t(b)), 2)
-Rural <- round(data.frame(t(c)), 2)
-Male <- round(data.frame(t(d)), 2)
-Female <- round(data.frame(t(e)), 2)
-ag15.24 <- round(data.frame(t(f)), 2)
-ag25.34 <- round(data.frame(t(g)), 2)
-ag35.44 <- round(data.frame(t(h)), 2)
-ag45.54 <- round(data.frame(t(i)), 2)
-ag55.64 <- round(data.frame(t(j)), 2)
-ag65 <- round(data.frame(t(k)), 2)
-Total <- round(data.frame(t(l)), 2)
-
-
-prevalence_ca <- bind_rows(Urban, Rural, Male, Female, ag15.24, ag25.34, ag35.44, ag45.54, ag55.64,ag65, Total)
-colnames(prevalence_ca) <- a
-
-prevalence_ca$Group <- c("Urban", "Rural","Male", "Female", 
-                         "15-24y" , "25-34y", "35-44y", "45-54y", "55-64y", "65+y",
-                         "Total")
-
-prevalence_ca <- prevalence_ca[, c("Group", "Cases", "Standard_dev", "Standard_error", "Prevalence", "Lower_95", "Upper_95")]
-
-
-# Remove excess dataframes and values
-rm(a, b, c, d, e, f, g, h, i, j, k, l,
-   ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL, Urban, Rural, Male, Female,
-   ag15.24, ag25.34, ag35.44, ag45.54, ag55.64, ag65, 
-   Total)
-
-
+#### CLUSTER LEVEL ANALYSIS ####
+
+#### Function for Crude Prevalence Calculation ####
+calculate_prevalence <- function(df, filter_col, filter_val) {
+  df_filtered <- df %>%
+    filter(!is.na(case), !!sym(filter_col) %in% filter_val) %>%
+    group_by(cluster_num, geoclass) %>%
+    summarize(sum_case = sum(case), n = n(), .groups = 'drop') %>%
+    mutate(rate = sum_case / n * 100000)
+  
+  ca_cases <- sum(df_filtered$sum_case)
+  ca_mean <- mean(df_filtered$rate)
+  ca_stdev <- sd(df_filtered$rate)
+  ca_se <- ca_stdev / sqrt(nrow(df_filtered))
+  ca_95LL <- ca_mean - (ca_se * 2)
+  ca_95UL <- ca_mean + (ca_se * 2)
+  
+  return(c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL))
+}
+
+# Define the groups and corresponding filter columns
+groups <- list(
+  Urban = list(filter_col = "geoclass", filter_val = "Urban"),
+  Rural = list(filter_col = "geoclass", filter_val = "Rural"),
+  Male = list(filter_col = "gender", filter_val = "Male"),
+  Female = list(filter_col = "gender", filter_val = "Female"),
+  `15-24` = list(filter_col = "agegp10", filter_val = "15-24"),
+  `25-34` = list(filter_col = "agegp10", filter_val = "25-34"),
+  `35-44` = list(filter_col = "agegp10", filter_val = "35-44"),
+  `45-54` = list(filter_col = "agegp10", filter_val = "45-54"),
+  `55-64` = list(filter_col = "agegp10", filter_val = "55-64"),
+  `65+` = list(filter_col = "agegp10", filter_val = "65+"),
+  Total = list(filter_col = "geoclass", filter_val = c("Urban", "Rural"))
+)
+
+# Calculate prevalence for each group
+results <- lapply(names(groups), function(group) {
+  calculate_prevalence(df, groups[[group]]$filter_col, groups[[group]]$filter_val)
+})
+
+# Create the results table
+results_df <- do.call(rbind, results) %>%
+  as.data.frame() %>%
+  setNames(c("Cases", "Prevalence", "Standard_dev", "Standard_error", "Lower_95", "Upper_95"))
+
+# Add Group column
+results_df$Group <- names(groups)
+
+# Reorder columns
+prevalence_ca <- results_df %>%
+  select(Group, Cases, Standard_dev, Standard_error, Prevalence, Lower_95, Upper_95)
+
+# Clean up the environment
+rm(calculate_prevalence, groups, results, results_df)
 
 
 #### * Figures #### 
 
 # Histogram of cluster frequency by prevalence
-p1 <- ggplot(df1, aes(x = rate)) +
+p1 <- ggplot(prevalence_ca, aes(x = Prevalence)) +
   geom_histogram(binwidth = 500, fill = colour1, color = colour5) +
   labs(title = "Histogram of cluster frequency, by prevalence",
        x = "Prevalence per 100,000 population",
@@ -532,7 +202,7 @@ p1
 # Prevalence rates by group
 prevalence_ca$Group <- factor(prevalence_ca$Group, 
                               levels = c("Urban", "Rural", "Male", "Female", 
-                                         "15-24y" , "25-34y", "35-44y", "45-54y", "55-64y", "65+y",
+                                         "15-24" , "25-34", "35-44", "45-54", "55-64", "65+",
                                          "Total"))  
 
 p2 <- ggplot(prevalence_ca, aes(x = Group, y = Prevalence)) +
@@ -540,8 +210,8 @@ p2 <- ggplot(prevalence_ca, aes(x = Group, y = Prevalence)) +
   geom_errorbar(aes(ymin = Lower_95, ymax = Upper_95), width = 0.25, position = position_dodge(0.9)) +
   scale_fill_manual(values = c("Urban" = colour1, "Rural" = colour2, 
                                "Male" = colour3, "Female" = colour4, 
-                               "15-24y" = colour6a, "25-34y" = colour6b, "35-44y" = colour6c, 
-                               "45-54y" = colour6d, "55-64y" = colour6e, "65+y" = colour6f,
+                               "15-24" = colour6a, "25-34" = colour6b, "35-44" = colour6c, 
+                               "45-54" = colour6d, "55-64" = colour6e, "65+" = colour6f,
                                "Total" = colour7)) +
   labs(title = "Cluster-Level Analysis of Prevalence, by Group",
        x = "Group",
@@ -559,14 +229,11 @@ p2
 
 # Robust standard errors, no missing value imputation, no weighting, limited to participants
 
-
 #### * Create dataframe ####
-
 df1 <- df %>%
-  subset(!is.na(case)) %>%
+  filter(!is.na(case)) %>%
   select(cluster_num, agegp10, gender, geoclass, case, weight_cluster) %>%
   mutate(n = 1)
-
 
 # Create a vector of variable names that you do not want to convert to factors
 vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster")
@@ -668,24 +335,94 @@ agg_predictions_group <- agg_predictions_group %>%
 model_1_overall <- agg_predictions_tot
 model_1_bygroup <- agg_predictions_group
 
+# Clean up the environment
 rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se)
 
 
 
+#### ~Model 2~ ####
 
-#### ~Model 2 - version 2~ ####
+#### * Multiple imputation script ####
 
-#### * Run imputation script ####
+#### * Visualise missing data ####
 
-# < See separate script - Imputation_1.R >
+# # Function to calculate percentage of missing values
+# pMiss <- function(x) {sum(is.na(x)) / length(x) * 100}
+# 
+# # Check missing values for each column and row
+# col_missing <- apply(df, 2, pMiss)
+# row_missing <- apply(df, 1, pMiss)
+# 
+# # Display missing data pattern
+# md_pattern <- md.pattern(df)
+# 
+# # Plot missing data pattern
+# aggr_plot <- aggr(df, col = c('navyblue', 'red'), numbers = TRUE, sortVars = TRUE, labels = names(df), cex.axis = .7, gap = 3, ylab = c("Histogram of missing data", "Pattern"))
+# 
+
+#### * Imputation - step 1 ####
+
+# Impute missing data on survey TB case status where no valid culture result
+
+# Subset data for positive Ultra result (including those with and without valid culture result)
+df1 <- df %>%
+  filter(res_xpert_a != 0 | res_xpert_b != 0)
+
+# Select variables for imputation
+vars_impute_step1 <- c("res_xpert_a", "res_xpert_b", "tbhx", "tbhx_current")
+
+# Impute missing values for "case" using selected variables
+imputed_data_step1 <- mice(df1[, c("case", vars_impute_step1)], method = "pmm", m = 100, seed = 1000)
+
+# Complete the imputation and update the "case" column
+df1$case <- complete(imputed_data_step1)$case
+
+#### * Imputation - step 2 ####
+
+# Impute missing data on survey TB case status where no valid Ultra result
+
+# Subset data for sputum testing eligibility including those with and without valid Ultra results
+df2 <- df %>%
+  filter(screen_pos == 1, is.na(res_xpert_binary))
+
+# Combine imputed dataframe from step 1 with sputum eligible but not Ultra positive participants
+df3 <- bind_rows(df1, df2)
+
+# Select variables for imputation
+vars_impute_step2 <- c("agegp5", "gender", "geoclass", "cxr_abnormality_score", 
+                       "symptom_cough", "symptom_cough_prolonged", "symptom_fever", 
+                       "symptom_weightloss", "symptom_nightsweat", "tbhx", "tbhx_current")
+
+# Impute missing values for "case" using selected variables
+imputed_data_step2 <- mice(df3[, c("case", vars_impute_step2)], method = "pmm", m = 1, seed = 1000)
+
+# Complete the imputation and update the "case" column
+df3$case <- complete(imputed_data_step2)$case
+
+#### * Combine data ####
+
+# Subset data for participants not eligible for sputum examination
+df4 <- df %>%
+  filter(is.na(screen_pos))
+
+# Combine with participants eligible for sputum examination
+df5 <- bind_rows(df3, df4) %>%
+  arrange(individual_id)
+
+# df5 now contains all data of original df, with multiple imputation of case status completed
+
+# Clean up the environment
+rm(df1, df2, df3, df4, vars_impute_step1, vars_impute_step2, imputed_data_step1, imputed_data_step2, col_missing, row_missing, md_pattern, aggr_plot)
+
+
+# End of imputation script
 
 
 #### * Create dataframe ####
 df1 <- df5 %>%
-  subset(!is.na(case)) %>% # limits df to participants only
+  filter(!is.na(case)) %>% # limits df to participants only
   select(cluster_num, agegp10, gender, geoclass, case, cxr_finding, res_xpert_a, res_xpert_b, res_culture_a, weight_cluster) %>%
   mutate(n = 1)
-
 
 # Create a vector of variable names that you do not want to convert to factors
 vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster")
@@ -719,7 +456,7 @@ agg_predictions_tot$prevalence_rate_per_100000 <- agg_predictions_tot$predicted_
 
 #### * Robust SE for overall estimate CI ####
 
-# Calculate robust SE for overall prevalence
+#Calculate robust SE for overall prevalence
 vcov_matrix <- vcovHC(model, type = "HC0")
 se_overall_prevalence <- sqrt(vcov_matrix["(Intercept)", "(Intercept)"]) * 100000
 
@@ -787,14 +524,12 @@ agg_predictions_group <- agg_predictions_group %>%
 model_2_overall <- agg_predictions_tot
 model_2_bygroup <- agg_predictions_group
 
+# Clean up the environment
 rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se)
 
 
 
-
-
 #### ~Model 3~ ####
-
 
 #### * Create dataframe ####
 
@@ -905,5 +640,6 @@ agg_predictions_group <- agg_predictions_group %>%
 model_3_overall <- agg_predictions_tot
 model_3_bygroup <- agg_predictions_group
 
-rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se)
+rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se, df5, df1)
+
 
