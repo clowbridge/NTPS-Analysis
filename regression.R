@@ -75,7 +75,7 @@ df <- dfe %>%
 
 # Rename chosen case definition to case
 df <- df %>%
-  rename(case = casedef_who)
+  rename(case = casedef_inc_trace)
 
 
 
@@ -95,9 +95,9 @@ df <- df %>%
 
 #### * Create weights for group combos (for Model 3) ####
 
-# Count N for each combination of cluster, age group, and gender - eligible population (N)
+# Count N for each combination of cluster, age group, and gender - sputum eligible population (N)
 eligible_count <- df %>%
-  filter(eligible_rec == 1) %>%
+  filter(screen_pos == 1) %>%
   group_by(cluster_num, agegp10, gender) %>%
   summarise(N = n(), .groups = 'drop')
 
@@ -196,7 +196,7 @@ p1 <- ggplot(prevalence_ca, aes(x = Prevalence)) +
        y = "Frequency") +
   theme_classic2()
 
-p1
+#p1
 
 
 # Prevalence rates by group
@@ -219,7 +219,7 @@ p2 <- ggplot(prevalence_ca, aes(x = Group, y = Prevalence)) +
   theme_classic2() +
   guides(fill = "none")
 
-p2
+#p2
 
 
 
@@ -548,6 +548,10 @@ vars_to_convert <- setdiff(names(df1), vars_to_exclude)
 df1[vars_to_convert] <- lapply(df1[vars_to_convert], factor)
 
 rm(vars_to_convert, vars_to_exclude)
+
+# Convert NA weights to 0
+df1$weight_comb[is.na(df1$weight_comb)] <- 0
+
 
 
 #### * Create model ####
