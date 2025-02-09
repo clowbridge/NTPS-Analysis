@@ -26,48 +26,34 @@ library(mice)
 # detach("arm", unload = TRUE) # arm package interferes with dplyr select function
 
 
-#### * Create colourscheme ####
-
-colour1 <- "#80CDC1" #Light aqua
-colour2 <- "#018571" # Dark teal
-colour3 <- "#B2ABD2" # Light purple
-colour4 <- "#5E3C99" # Dark purple
-colour5 <- "#404040" # Dark grey
-colour6 <- "#FFC107" # (Primary) Bright amber
-colour7 <- "#BDBDBD" # Light grey
-
-# Gradient scheme using colour6
-colour6a <- "#FFF350"
-colour6b <- "#FFEC47"
-colour6c <- "#FFE53E"
-colour6d <- "#FFDB35"
-colour6e <- "#FFD22C"
-colour6f <- "#FFC107"
-
-# Updated gradient scheme using colour6
-colour6a <- "#FFF350"
-colour6b <- "#FFD13F"
-colour6c <- "#FFAA33"
-colour6d <- "#FF8026"
-colour6e <- "#FF551A"
-colour6f <- "#FF2A0D"
-
-
-
 #### * Create base dataframe ####
 
 df <- dfe %>%
   select(individual_id,
          cluster_num, 
          casedef_who, casedef_inc_trace, casedef_exc_trace,
-         geoclass,
+         geoclass, municipality,
          gender, agegp5, agegp10,
-         tbhx, tbhx_current,
+         tbhx, tbhx_2, tbhx_5,
          symptom_cough, symptom_cough_prolonged, symptom_fever, symptom_weightloss, symptom_nightsweat, symptomscreen, 
          eligible_rec, screen_pos,
          radscore, cxr_abnormality_score, cxr_finding,
-         res_xpert_a, res_xpert_b, res_xpert_binary, res_culture_a, cd_culture,
-         reg)
+         res_xpert, res_xpert_a, res_xpert_b, res_xpert_binary, res_culture_a, cd_culture,
+         caseclass_who,
+         reg, stored_cluster)
+
+df$caseclass_who <- factor(
+  df$caseclass_who, 
+  levels = c("1a", "1b", "1c", "1d", 
+             "0a", "0b", "0c", "0d", "0e", "0f", "0g", 
+             "9a", "9b", "9c")
+)
+
+
+# Remove clusters affected by lab storage issue (for WHO case definition only)
+# df <- df %>%
+#   subset(stored_cluster != 1)
+
 
 
 # Select desired case definition:
@@ -77,7 +63,7 @@ df <- dfe %>%
 
 # Rename chosen case definition to case
 df <- df %>%
-  rename(case = casedef_who)
+  rename(case = casedef_inc_trace)
 
 
 
@@ -97,9 +83,9 @@ df <- df %>%
 
 #### * Create weights for group combos (for Model 3) ####
 
-# Count N for each combination of cluster, age group, and gender - sputum eligible population (N)
+# Count N for each combination of cluster, age group, and gender - survey eligible population (N)
 eligible_count <- df %>%
-  filter(screen_pos == 1) %>%
+  filter(eligible_rec == 1) %>%
   group_by(cluster_num, agegp10, gender) %>%
   summarise(N = n(), .groups = 'drop')
 
@@ -137,24 +123,50 @@ rm(cen, cen_hh, cen_in, clusters, dfd, int, lab, pop_agesex, pop_aldeia, rad, re
 
 
 
+# Create a vector of variable names not to be converted to factors
+vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster", "weight_group", "weight_comb")
+
+# Get the variable names to convert by excluding the specified variables
+vars_to_convert <- setdiff(names(df), vars_to_exclude)
+
+# Convert the specified variables to factors
+df[vars_to_convert] <- lapply(df[vars_to_convert], factor)
+
+rm(vars_to_convert, vars_to_exclude)
+
+
+
+
 #### CLUSTER LEVEL ANALYSIS ####
 
 #### Function for Crude Prevalence Calculation ####
 calculate_prevalence <- function(df, filter_col, filter_val) {
   df_filtered <- df %>%
     filter(!is.na(case), !!sym(filter_col) %in% filter_val) %>%
+    mutate(case = as.numeric(as.character(case))) %>%  # Convert factor to numeric
     group_by(cluster_num, geoclass) %>%
-    summarize(sum_case = sum(case), n = n(), .groups = 'drop') %>%
-    mutate(rate = sum_case / n * 100000)
+    summarize(sum_case = sum(case, na.rm = TRUE), 
+              n = n(), 
+              .groups = 'drop') %>%
+    mutate(rate = ifelse(n > 0, sum_case / n * 100000, NA))  # Avoid divide by zero
   
-  ca_cases <- sum(df_filtered$sum_case)
-  ca_mean <- mean(df_filtered$rate)
-  ca_stdev <- sd(df_filtered$rate)
-  ca_se <- ca_stdev / sqrt(nrow(df_filtered))
-  ca_95LL <- ca_mean - (ca_se * 2)
-  ca_95UL <- ca_mean + (ca_se * 2)
+  # Summarized statistics
+  ca_cases <- sum(df_filtered$sum_case, na.rm = TRUE)
+  ca_mean <- mean(df_filtered$rate, na.rm = TRUE)
+  ca_stdev <- sd(df_filtered$rate, na.rm = TRUE)
+  ca_se <- ifelse(nrow(df_filtered) > 1, ca_stdev / sqrt(nrow(df_filtered)), NA)
+  t_value <- qt(0.975, df = max(nrow(df_filtered) - 1, 1))  # T-distribution for CI
+  ca_95LL <- ca_mean - (t_value * ca_se)
+  ca_95UL <- ca_mean + (t_value * ca_se)
   
-  return(c(ca_cases, ca_mean, ca_stdev, ca_se, ca_95LL, ca_95UL))
+  return(tibble(
+    cases = ca_cases,
+    mean_rate = ca_mean,
+    stdev = ca_stdev,
+    se = ca_se,
+    ci_lower = ca_95LL,
+    ci_upper = ca_95UL
+  ))
 }
 
 # Define the groups and corresponding filter columns
@@ -172,65 +184,55 @@ groups <- list(
   Total = list(filter_col = "geoclass", filter_val = c("Urban", "Rural"))
 )
 
-# Calculate prevalence for each group
-results <- lapply(names(groups), function(group) {
-  calculate_prevalence(df, groups[[group]]$filter_col, groups[[group]]$filter_val)
-})
+# Calculate prevalence for each group and store results in a data frame
+results <- bind_rows(
+  lapply(names(groups), function(group) {
+    calculate_prevalence(df, groups[[group]]$filter_col, groups[[group]]$filter_val) %>%
+      mutate(group = group)  # Add group name
+  })
+)
 
-# Create the results table
-results_df <- do.call(rbind, results) %>%
-  as.data.frame() %>%
-  setNames(c("Cases", "Prevalence", "Standard_dev", "Standard_error", "Lower_95", "Upper_95"))
+# Convert the results list into a data frame and round values
+prevalence_ca <- bind_rows(results) %>%
+  mutate(
+    Group = names(groups),
+    cases = round(cases, 2),
+    stdev = round(stdev, 2),
+    se = round(se, 2),
+    mean_rate = round(mean_rate, 2),
+    ci_lower = round(ci_lower, 2),
+    ci_upper = round(ci_upper, 2)
+  ) %>%
+  select(Group, cases, stdev, se, mean_rate, ci_lower, ci_upper) %>%  # Reorder columns
+  rename(
+    Cases = cases,
+    Standard_dev = stdev,
+    Standard_error = se,
+    Prevalence = mean_rate,
+    Lower_95 = ci_lower,
+    Upper_95 = ci_upper
+  )
 
-# Add Group column
-results_df$Group <- names(groups)
-
-# Reorder columns
-prevalence_ca <- results_df %>%
-  select(Group, Cases, Standard_dev, Standard_error, Prevalence, Lower_95, Upper_95)
 
 # Clean up the environment
-rm(calculate_prevalence, groups, results, results_df)
+rm(calculate_prevalence, groups, results)
 
-
-#### * Figures #### 
-
-# # Histogram of cluster frequency by prevalence
-# p1 <- ggplot(prevalence_ca, aes(x = Prevalence)) +
-#   geom_histogram(binwidth = 500, fill = colour1, color = colour5) +
-#   labs(title = "Histogram of cluster frequency, by prevalence",
-#        x = "Prevalence per 100,000 population",
-#        y = "Frequency") +
-#   theme_classic2()
-# 
-# p1
-# 
-# 
-# # Prevalence rates by group
-# prevalence_ca$Group <- factor(prevalence_ca$Group,
-#                               levels = c("Urban", "Rural", "Male", "Female",
-#                                          "15-24" , "25-34", "35-44", "45-54", "55-64", "65+",
-#                                          "Total"))
-# 
-# p2 <- ggplot(prevalence_ca, aes(x = Group, y = Prevalence)) +
-#   geom_col(aes(fill = Group), color = colour5, position = "dodge") +
-#   geom_errorbar(aes(ymin = Lower_95, ymax = Upper_95), width = 0.25, position = position_dodge(0.9)) +
-#   scale_fill_manual(values = c("Urban" = colour1, "Rural" = colour2,
-#                                "Male" = colour3, "Female" = colour4,
-#                                "15-24" = colour6a, "25-34" = colour6b, "35-44" = colour6c,
-#                                "45-54" = colour6d, "55-64" = colour6e, "65+" = colour6f,
-#                                "Total" = colour7)) +
-#   labs(title = "Cluster-Level Analysis of Prevalence, by Group",
-#        x = "Group",
-#        y = "Prevalence Rate (per 100,000)") +
-#   theme_classic2() +
-#   guides(fill = "none")
-# 
-# p2
-# 
 
 
 #### INDIVIDUAL LEVEL ANALYSIS ####
+
+# Create a vector of variable names that you do not want to convert to factors
+vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster", "weight_group", "weight_comb")
+
+# Get the variable names to convert by excluding the specified variables
+vars_to_convert <- setdiff(names(df), vars_to_exclude)
+
+# Convert the specified variables to factors
+df[vars_to_convert] <- lapply(df[vars_to_convert], factor)
+
+rm(vars_to_convert, vars_to_exclude)
+
+
 
 #### ~Model 1~ ####
 
@@ -239,31 +241,15 @@ rm(calculate_prevalence, groups, results, results_df)
 #### * Create dataframe ####
 df1 <- df %>%
   filter(!is.na(case)) %>%
-  select(cluster_num, agegp10, gender, geoclass, case, weight_cluster) %>%
+  select(cluster_num, agegp10, gender, geoclass, municipality, case, weight_cluster) %>%
   mutate(n = 1)
 
-# Create a vector of variable names that you do not want to convert to factors
-vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster")
-
-# Get the variable names to convert by excluding the specified variables
-vars_to_convert <- setdiff(names(df1), vars_to_exclude)
-
-# Convert the specified variables to factors
-df1[vars_to_convert] <- lapply(df1[vars_to_convert], factor)
-
-rm(vars_to_convert, vars_to_exclude)
 
 
-#### * Create model ####
+#### * Create model - overall & group ####
 
 # Create survey design object with weights
 design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_cluster, data = df1)
-
-
-# *** Check this line - ? no weights - Create survey design object with weights
-#design <- svydesign(id = ~cluster_num, strata = ~geoclass, data = df1)
-
-
 
 # Fit the logistic regression model with survey design
 model <- svyglm(case ~ geoclass + agegp10 + gender, family = quasibinomial(link = "logit"), design = design)
@@ -353,104 +339,10 @@ rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, d
 
 
 
-#### ~Model 2~ ####
-
-#### * Multiple imputation script ####
-
-#### * Visualise missing data ####
-
-# # Function to calculate percentage of missing values
-# pMiss <- function(x) {sum(is.na(x)) / length(x) * 100}
-# 
-# # Check missing values for each column and row
-# col_missing <- apply(df, 2, pMiss)
-# row_missing <- apply(df, 1, pMiss)
-# 
-# # Display missing data pattern
-# md_pattern <- md.pattern(df)
-# 
-# # Plot missing data pattern
-# aggr_plot <- aggr(df, col = c('navyblue', 'red'), numbers = TRUE, sortVars = TRUE, labels = names(df), cex.axis = .7, gap = 3, ylab = c("Histogram of missing data", "Pattern"))
-# 
-
-#### * Imputation - step 1 ####
-
-# Impute missing data on survey TB case status where no valid culture result
-
-# Subset data for positive Ultra result (including those with and without valid culture result)
-df1 <- df %>%
-  filter(res_xpert_a != 0 | res_xpert_b != 0)
-
-# Select variables for imputation
-vars_impute_step1 <- c("res_xpert_a", "res_xpert_b", "tbhx", "tbhx_current")
-
-# Impute missing values for "case" using selected variables
-imputed_data_step1 <- mice(df1[, c("case", vars_impute_step1)], method = "logreg", m = 100, seed = 13624)
-
-# Complete the imputation and update the "case" column
-df1$case <- complete(imputed_data_step1)$case
-
-#### * Imputation - step 2 ####
-
-# Impute missing data on survey TB case status where no valid Ultra result
-
-# Subset data for sputum testing eligibility including those with and without valid Ultra results
-df2 <- df %>%
-  filter(screen_pos == 1, is.na(res_xpert_binary))
-
-# Combine imputed dataframe from step 1 with sputum eligible but not Ultra positive participants
-df3 <- bind_rows(df1, df2)
-
-# Select variables for imputation
-vars_impute_step2 <- c("agegp5", "gender", "geoclass", "cxr_abnormality_score", 
-                       "symptom_cough", "symptom_cough_prolonged", "symptom_fever", 
-                       "symptom_weightloss", "symptom_nightsweat", "tbhx", "tbhx_current")
-
-# Impute missing values for "case" using selected variables
-imputed_data_step2 <- mice(df3[, c("case", vars_impute_step2)], method = "logreg", m = 100, seed = 219)
-
-# Complete the imputation and update the "case" column
-df3$case <- complete(imputed_data_step2)$case
-
-#### * Combine data ####
-
-# Subset data for participants not eligible for sputum examination
-df4 <- df %>%
-  filter(is.na(screen_pos))
-
-# Combine with participants eligible for sputum examination
-df5 <- bind_rows(df3, df4) %>%
-  arrange(individual_id)
-
-# df5 now contains all data of original df, with multiple imputation of case status completed
-
-# Clean up the environment
-rm(df1, df2, df3, df4, vars_impute_step1, vars_impute_step2, imputed_data_step1, imputed_data_step2, col_missing, row_missing, md_pattern, aggr_plot)
-
-
-
-#### * Create dataframe ####
-df1 <- df5 %>%
-  filter(!is.na(case)) %>% # limits df to participants only
-  select(cluster_num, agegp10, gender, geoclass, case, cxr_finding, res_xpert_a, res_xpert_b, res_culture_a, weight_group) %>%
-  mutate(n = 1)
-
-# Create a vector of variable names that you do not want to convert to factors
-vars_to_exclude <- c("cxr_abnormality_score", "weight_group")
-
-# Get the variable names to convert by excluding the specified variables
-vars_to_convert <- setdiff(names(df1), vars_to_exclude)
-
-# Convert the specified variables to factors
-df1[vars_to_convert] <- lapply(df1[vars_to_convert], factor)
-
-rm(vars_to_convert, vars_to_exclude)
-
-
-#### * Create model ####
+#### * Create model - municipality ####
 
 # Create survey design object with weights
-design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_group, data = df1)
+design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_cluster, data = df1)
 
 # Fit the logistic regression model with survey design
 model <- svyglm(case ~ geoclass + agegp10 + gender, family = quasibinomial(link = "logit"), design = design)
@@ -465,23 +357,16 @@ agg_predictions_tot <- data.frame(predicted_prob = mean(df1$predicted_prob))
 agg_predictions_tot$prevalence_rate_per_100000 <- agg_predictions_tot$predicted_prob * 100000 
 
 
-#### * Robust SE for overall estimate CI ####
-
-#Calculate robust SE for overall prevalence
-vcov_matrix <- vcovHC(model, type = "HC0")
-se_overall_prevalence <- sqrt(vcov_matrix["(Intercept)", "(Intercept)"]) * 100000
-
-# Calculate the confidence limits for the prevalence rate using robust standard errors
-z_value <- qnorm(0.975) # Z-value for 95% confidence interval
-agg_predictions_tot$lower_ci <- agg_predictions_tot$prevalence_rate_per_100000 - (z_value * se_overall_prevalence)
-agg_predictions_tot$upper_ci <- agg_predictions_tot$prevalence_rate_per_100000 + (z_value * se_overall_prevalence)
-
 
 #### * Robust SE for group estimates CIs ####
 
+# Calculate the confidence limits for the prevalence rate using robust standard errors
+z_value <- qnorm(0.975) # Z-value for 95% confidence interval
+
+
 # Aggregate prediction of prevalence rate by group
 agg_predictions_group <- df1 %>%
-  group_by(geoclass, agegp10, gender) %>%
+  group_by(municipality) %>%
   summarize(predicted_prob = mean(predicted_prob), .groups = 'drop')
 
 # Calculate prevalence rate per 100,000 people
@@ -518,7 +403,7 @@ calculate_group_se <- function(model, group_data) {
 
 # Prepare group data for SE calculation
 group_data <- agg_predictions_group %>%
-  select(geoclass, agegp10, gender)
+  select(municipality)
 
 # Calculate standard errors for group-level predictions
 agg_predictions_group$se_group <- calculate_group_se(model, group_data)
@@ -532,129 +417,355 @@ agg_predictions_group <- agg_predictions_group %>%
 #### * Results ####
 
 # Final results
-model_2_overall <- agg_predictions_tot
-model_2_bygroup <- agg_predictions_group
+model_1_bymunicipality <- agg_predictions_group
 
 # Clean up the environment
-rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se)
+rm(agg_predictions_group, agg_predictions_tot, group_data, model, design, z_value, calculate_group_se)
+
+
+
+#### ~Multiple imputation~ ####
+
+#### * MI Step 1 ####
+
+# Step 1: Filter individuals with ≥1 positive xpert Ultra test result
+df1 <- df
+
+df_xpert_pos <- df1 %>% 
+  filter(caseclass_who %in% c("0c", "0d", "0e", "0f", "1a", "1b", "1c", "1d", "9b", "9c")) 
+
+# Step 2: Identify those with missing culture results
+df_missing_culture <- df_xpert_pos %>%
+  filter(caseclass_who %in% c("1d", "9b", "9c"))  
+
+df_valid_culture <- df_xpert_pos %>%
+  filter(caseclass_who %in% c("0c", "0d", "0e", "0f", "1a", "1b", "1c"))  
+
+# Step 3: Logistic Regression Model for Imputation
+logit_model <- glm(case ~ res_xpert + tbhx + tbhx_5, 
+                   data = df_valid_culture, 
+                   family = binomial)
+
+# Step 4: Define Predictor Matrix (Only Include Specified Variables)
+predictor_matrix <- make.predictorMatrix(df_xpert_pos)
+
+# Set all variables to 0 (exclude them from imputation)
+predictor_matrix[,] <- 0
+
+# Specify the variables to include in imputation
+include_vars <- c("case", "res_xpert", "tbhx", "tbhx_5")
+predictor_matrix[include_vars, include_vars] <- 1  # Only these variables will be used for imputation
+
+# Prevent self-prediction for `case`
+predictor_matrix["case", "case"] <- 0  
+
+# Ensure `meth` has an entry for every column in `df_xpert_pos`
+meth <- rep("", ncol(df_xpert_pos))  
+names(meth) <- colnames(df_xpert_pos)  # Ensure names match dataset columns
+
+# Assign imputation methods for selected variables
+meth["case"] <- "logreg"      # Logistic regression for binary survey TB case
+meth["res_xpert"] <- "polr"    # Predictive mean matching for ordered factor variable
+meth["tbhx"] <- "logreg"      # Logistic regression for binary current TB treatment
+meth["tbhx_5"] <- "logreg"    # Logistic regression for binary TB treatment in the last 5 years
+
+# Run multiple imputation
+imputed_data <- mice(df_xpert_pos, 
+                     m = 100, 
+                     method = meth,
+                     predictorMatrix = predictor_matrix,
+                     seed = 123)
+
+# Convert imputed data into a list format
+imputed_list <- complete(imputed_data, action = "long")
+
+# Step 5: Merge each imputed dataset with the sputum-eligible individuals
+df_sputum_eligible <- df1 %>% filter(caseclass_who %in% c("0a", "0b", "9a"))
+
+
+step1_imputed_datasets <- lapply(1:100, function(i) {
+  df_imputed <- complete(imputed_data, action = i)
+  full_data <- bind_rows(df_imputed, df_sputum_eligible)  # Merge imputed + sputum eligible
+  return(full_data)
+})
+
+
+# Step 6: tidy up environment 
+rm(df_missing_culture, df_sputum_eligible, df_valid_culture, df_xpert_pos, imputed_data, imputed_list, logit_model, predictor_matrix, include_vars, meth)
+
+
+
+#### * MI Step 2 ####
+
+# Improved version with better error handling and documentation
+step2_imputed_datasets <- lapply(seq_along(step1_imputed_datasets), function(i) {
+  # Extract the i-th data frame
+  df_imputed_step1 <- step1_imputed_datasets[[i]]
+  
+  # Define all variables upfront for better maintenance
+  CATEGORICAL_VARS <- c(
+    "agegp5", "gender", "geoclass", 
+    "symptom_cough", "symptom_cough_prolonged", 
+    "symptom_fever", "symptom_weightloss", "symptom_nightsweat", 
+    "tbhx", "tbhx_5"
+  )
+  
+  IMPUTATION_VARS <- c(
+    "case", CATEGORICAL_VARS, "cxr_abnormality_score"
+  )
+  
+  # Function to safely process categorical variables
+  process_categorical <- function(df, var) {
+    if (var %in% colnames(df)) {
+      df[[var]] <- as.factor(df[[var]])
+      if (length(unique(df[[var]])) < 2) {
+        warning(sprintf("Variable %s has fewer than 2 levels in dataset %d", var, i))
+        return(NA)
+      }
+    }
+    return(df[[var]])
+  }
+  
+  # Split data and process known TB cases
+  df_known_tb_case <- df_imputed_step1[!is.na(df_imputed_step1$case), ]
+  
+  # Process categorical variables with better error handling
+  for (var in CATEGORICAL_VARS) {
+    df_known_tb_case[[var]] <- process_categorical(df_known_tb_case, var)
+  }
+  
+  # Remove variables with single levels
+  vars_to_keep <- sapply(df_known_tb_case, function(x) length(unique(x[!is.na(x)])) >= 2)
+  df_known_tb_case <- df_known_tb_case[, vars_to_keep]
+  
+  # Set up predictor matrix more efficiently
+  predictor_matrix <- matrix(0, 
+                             ncol = ncol(df_imputed_step1), 
+                             nrow = ncol(df_imputed_step1),
+                             dimnames = list(names(df_imputed_step1), 
+                                             names(df_imputed_step1)))
+  
+  # Set up prediction relationships for existing variables
+  existing_vars <- intersect(names(df_imputed_step1), IMPUTATION_VARS)
+  predictor_matrix[existing_vars, existing_vars] <- 1
+  predictor_matrix["case", "case"] <- 0  # Prevent self-prediction
+  
+  # Define imputation methods
+  meth <- setNames(rep("", ncol(df_imputed_step1)), colnames(df_imputed_step1))
+  
+  # Method mapping
+  method_map <- list(
+    case = "logreg",
+    agegp5 = "polr",
+    gender = "logreg",
+    geoclass = "logreg",
+    cxr_abnormality_score = "pmm",
+    symptom_cough = "logreg",
+    symptom_cough_prolonged = "logreg",
+    symptom_fever = "logreg",
+    symptom_weightloss = "logreg",
+    symptom_nightsweat = "logreg",
+    tbhx = "logreg",
+    tbhx_5 = "logreg"
+  )
+  
+  # Apply methods for existing variables
+  for (var in names(method_map)) {
+    if (var %in% names(df_imputed_step1)) {
+      meth[var] <- method_map[[var]]
+    }
+  }
+  
+  # Run multiple imputation with tryCatch for better error handling
+  tryCatch({
+    imputed_data <- mice(
+      df_imputed_step1,
+      m = 1,
+      method = meth,
+      predictorMatrix = predictor_matrix,
+      seed = 123,
+      printFlag = FALSE  # Reduce console output
+    )
+    return(complete(imputed_data))
+  }, error = function(e) {
+    warning(sprintf("Imputation failed for dataset %d: %s", i, e$message))
+    return(NULL)
+  })
+})
+
+# Remove NULL results from failed imputations
+step2_imputed_datasets <- Filter(Negate(is.null), step2_imputed_datasets)
+
+
+# Combine imputed data with screen negative participants
+df2 <- df1 %>%
+  filter(caseclass_who %in% "0g")
+
+merged <- lapply(step2_imputed_datasets, function(df) {
+  bind_rows(df, df2) 
+})
+
+
+#### ~Model 2~ ####
+
+#### * Iterate model over imputed data ####
+
+# Function to apply modeling and calculations to a single dataframe
+process_dataframe <- function(df) {
+  
+  # Create survey design object with weights
+  design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_cluster, data = df)
+  
+  # Fit the logistic regression model with survey design
+  model <- svyglm(case ~ geoclass + agegp10 + gender, family = quasibinomial(link = "logit"), design = design)
+  
+  # Predict probability of the outcome
+  df$predicted_prob <- predict(model, design = design, type = "response")
+  
+  # Aggregate prediction of overall prevalence rate
+  agg_predictions_tot <- data.frame(predicted_prob = mean(df$predicted_prob))
+  
+  # Calculate prevalence rate per 100,000 people
+  agg_predictions_tot$prevalence_rate_per_100000 <- agg_predictions_tot$predicted_prob * 100000
+  
+  # Robust SE for overall estimate CI 
+  
+  # Calculate robust SE for overall prevalence
+  vcov_matrix <- vcovHC(model, type = "HC0")
+  se_overall_prevalence <- sqrt(vcov_matrix["(Intercept)", "(Intercept)"]) * 100000
+  
+  # Confidence limits for the prevalence rate using robust SE
+  z_value <- qnorm(0.975) # Z-value for 95% confidence interval
+  agg_predictions_tot <- agg_predictions_tot %>%
+    mutate(lower_ci = prevalence_rate_per_100000 - (z_value * se_overall_prevalence),
+           upper_ci = prevalence_rate_per_100000 + (z_value * se_overall_prevalence))
+  
+  # Return results as a list
+  return(list(overall = agg_predictions_tot))
+}
+
+# Apply function to each dataset in the list 'merged'
+results_list <- lapply(merged, process_dataframe)
+
+# Extract overall prevalence and group-level results into separate lists
+model_2_overall_list <- lapply(results_list, `[[`, "overall")
+
+
+#### * Pool model 2 results ####
+
+# Convert list of results into a data frame
+overall_results <- bind_rows(model_2_overall_list, .id = "imputation_id")
+
+# Compute mean of prevalence estimates across imputations
+Q_bar <- mean(overall_results$prevalence_rate_per_100000)  # Pooled prevalence estimate
+
+# Compute within-imputation variance (average squared standard error)
+U_bar <- mean((overall_results$upper_ci - overall_results$lower_ci)^2) / (4 * qnorm(0.975)^2)
+
+# Compute between-imputation variance (variance of point estimates across imputations)
+B <- var(overall_results$prevalence_rate_per_100000)
+
+# Compute total variance using Rubin’s rules
+T_var <- U_bar + (1 + (1 / length(model_2_overall_list))) * B
+
+# Compute 95% confidence interval for pooled prevalence
+se_T <- sqrt(T_var)
+z_value <- qnorm(0.975)  # 95% CI Z-score
+
+lower_ci_pooled <- Q_bar - z_value * se_T
+upper_ci_pooled <- Q_bar + z_value * se_T
+
+# Final pooled results
+model_2_overall <- data.frame(
+  pooled_prevalence = Q_bar,
+  lower_ci = lower_ci_pooled,
+  upper_ci = upper_ci_pooled
+)
+
+
+# Tidy environment
+rm(step1_imputed_datasets, step2_imputed_datasets, results_list, model_2_overall_list, B, lower_ci_pooled,
+   Q_bar, se_T, T_var, U_bar, upper_ci_pooled, z_value, process_dataframe, overall_results)
 
 
 
 #### ~Model 3~ ####
 
-#### * Create dataframe ####
+#### * Iterate model over imputed data ####
 
-# Retrieve dataset with imputation
-df1 <- df5 %>%
-  subset(!is.na(case)) # limits df to participants only
-
-
-# Create a vector of variable names that you do not want to convert to factors
-vars_to_exclude <- c("cxr_abnormality_score", "weight_cluster", "weight_group", "weight_comb")
-
-# Get the variable names to convert by excluding the specified variables
-vars_to_convert <- setdiff(names(df1), vars_to_exclude)
-
-# Convert the specified variables to factors
-df1[vars_to_convert] <- lapply(df1[vars_to_convert], factor)
-
-rm(vars_to_convert, vars_to_exclude)
-
-# Convert NA weights to 0
-df1$weight_comb[is.na(df1$weight_comb)] <- 0
-df1$weight_group[is.na(df1$weight_group)] <- 0
-
-
-#### * Create model ####
-
-# Create survey design object with weights
-design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_comb, data = df1)
-
-# Fit the logistic regression model with survey design
-model <- svyglm(case ~ geoclass + agegp10 + gender, family = quasibinomial(link = "logit"), design = design)
-
-# Predict probability of the outcome
-df1$predicted_prob <- predict(model, type = "response")
-
-
-# Aggregate prediction of overall prevalence rate
-agg_predictions_tot <- data.frame(predicted_prob = mean(df1$predicted_prob))
-
-# Calculate prevalence rate per 100,000 people
-agg_predictions_tot$prevalence_rate_per_100000 <- agg_predictions_tot$predicted_prob * 100000 
-
-
-
-#### * Robust SE for overall estimate CI ####
-
-# Calculate robust SE for overall prevalence
-vcov_matrix <- vcovHC(model, type = "HC0")
-se_overall_prevalence <- sqrt(vcov_matrix["(Intercept)", "(Intercept)"]) * 100000
-
-# Calculate the confidence limits for the prevalence rate using robust standard errors
-z_value <- qnorm(0.975) # Z-value for 95% confidence interval
-agg_predictions_tot$lower_ci <- agg_predictions_tot$prevalence_rate_per_100000 - (z_value * se_overall_prevalence)
-agg_predictions_tot$upper_ci <- agg_predictions_tot$prevalence_rate_per_100000 + (z_value * se_overall_prevalence)
-
-
-#### * Robust SE for group estimates CIs ####
-
-# Aggregate prediction of prevalence rate by group
-agg_predictions_group <- df1 %>%
-  group_by(geoclass, agegp10, gender) %>%
-  summarize(predicted_prob = mean(predicted_prob), .groups = 'drop')
-
-# Calculate prevalence rate per 100,000 people
-agg_predictions_group$prevalence_rate_per_100000 <- agg_predictions_group$predicted_prob * 100000
-
-# Function to calculate standard errors for predicted probabilities
-calculate_group_se <- function(model, group_data) {
-  model_matrix <- model.matrix(model)
+# Function to apply modeling and calculations to a single dataframe
+process_dataframe <- function(df) {
+  
+  # Create survey design object with weights
+  design <- svydesign(id = ~cluster_num, strata = ~geoclass, weights = ~weight_comb, data = df)
+  
+  # Fit the logistic regression model with survey design
+  model <- svyglm(case ~ geoclass + agegp10 + gender, family = quasibinomial(link = "logit"), design = design)
+  
+  # Predict probability of the outcome
+  df$predicted_prob <- predict(model, design = design, type = "response")
+  
+  # Aggregate prediction of overall prevalence rate
+  agg_predictions_tot <- data.frame(predicted_prob = mean(df$predicted_prob))
+  
+  # Calculate prevalence rate per 100,000 people
+  agg_predictions_tot$prevalence_rate_per_100000 <- agg_predictions_tot$predicted_prob * 100000
+  
+  # Robust SE for overall estimate CI 
+  
+  # Calculate robust SE for overall prevalence
   vcov_matrix <- vcovHC(model, type = "HC0")
+  se_overall_prevalence <- sqrt(vcov_matrix["(Intercept)", "(Intercept)"]) * 100000
   
-  group_se <- apply(group_data, 1, function(row) {
-    # Initialize the row matrix for the group
-    row_matrix <- model_matrix[1, , drop = FALSE]
-    row_matrix[] <- 0
-    row_matrix[, "(Intercept)"] <- 1
-    
-    # Set the values for each predictor in the group
-    for (predictor in names(row)) {
-      predictor_name <- paste(predictor, row[predictor], sep = "")
-      if (predictor_name %in% colnames(row_matrix)) {
-        row_matrix[, predictor_name] <- 1
-      }
-    }
-    
-    # Calculate the variance for the row
-    var_pred <- row_matrix %*% vcov_matrix %*% t(row_matrix)
-    
-    # Return the standard error
-    return(sqrt(var_pred))
-  })
+  # Confidence limits for the prevalence rate using robust SE
+  z_value <- qnorm(0.975) # Z-value for 95% confidence interval
+  agg_predictions_tot <- agg_predictions_tot %>%
+    mutate(lower_ci = prevalence_rate_per_100000 - (z_value * se_overall_prevalence),
+           upper_ci = prevalence_rate_per_100000 + (z_value * se_overall_prevalence))
   
-  return(group_se)
+  # Return results as a list
+  return(list(overall = agg_predictions_tot))
 }
 
-# Prepare group data for SE calculation
-group_data <- agg_predictions_group %>%
-  select(geoclass, agegp10, gender)
+# Apply function to each dataset in the list 'merged'
+results_list <- lapply(merged, process_dataframe)
 
-# Calculate standard errors for group-level predictions
-agg_predictions_group$se_group <- calculate_group_se(model, group_data)
-
-# Calculate confidence intervals for group-level predictions
-agg_predictions_group <- agg_predictions_group %>%
-  mutate(lower_ci = prevalence_rate_per_100000 - (z_value * se_group * 100000),
-         upper_ci = prevalence_rate_per_100000 + (z_value * se_group * 100000))
+# Extract overall prevalence and group-level results into separate lists
+model_3_overall_list <- lapply(results_list, `[[`, "overall")
 
 
-#### * Results ####
+#### * Pool model 3 results ####
 
-# Final results
-model_3_overall <- agg_predictions_tot
-model_3_bygroup <- agg_predictions_group
+# Convert list of results into a data frame
+overall_results <- bind_rows(model_3_overall_list, .id = "imputation_id")
 
-#rm(agg_predictions_group, agg_predictions_tot, vcov_matrix, group_data, model, design, se_overall_prevalence, z_value, calculate_group_se, df5, df1)
+# Compute mean of prevalence estimates across imputations
+Q_bar <- mean(overall_results$prevalence_rate_per_100000)  # Pooled prevalence estimate
+
+# Compute within-imputation variance (average squared standard error)
+U_bar <- mean((overall_results$upper_ci - overall_results$lower_ci)^2) / (4 * qnorm(0.975)^2)
+
+# Compute between-imputation variance (variance of point estimates across imputations)
+B <- var(overall_results$prevalence_rate_per_100000)
+
+# Compute total variance using Rubin’s rules
+T_var <- U_bar + (1 + (1 / length(model_3_overall_list))) * B
+
+# Compute 95% confidence interval for pooled prevalence
+se_T <- sqrt(T_var)
+z_value <- qnorm(0.975)  # 95% CI Z-score
+
+lower_ci_pooled <- Q_bar - z_value * se_T
+upper_ci_pooled <- Q_bar + z_value * se_T
+
+# Final pooled results
+model_3_overall <- data.frame(
+  pooled_prevalence = Q_bar,
+  lower_ci = lower_ci_pooled,
+  upper_ci = upper_ci_pooled
+)
 
 
+# Tidy environment
+rm(results_list, model_3_overall_list, B, lower_ci_pooled,
+   Q_bar, se_T, T_var, U_bar, upper_ci_pooled, z_value, process_dataframe, overall_results)
