@@ -51,8 +51,8 @@ df$caseclass_who <- factor(
 
 
 # Remove clusters affected by lab storage issue (for WHO case definition only)
-# df <- df %>%
-#   subset(stored_cluster != 1)
+df <- df %>%
+  subset(stored_cluster != 1)
 
 
 
@@ -63,7 +63,7 @@ df$caseclass_who <- factor(
 
 # Rename chosen case definition to case
 df <- df %>%
-  rename(case = casedef_inc_trace)
+  rename(case = casedef_who)
 
 
 
@@ -144,10 +144,12 @@ calculate_prevalence <- function(df, filter_col, filter_val) {
   df_filtered <- df %>%
     filter(!is.na(case), !!sym(filter_col) %in% filter_val) %>%
     mutate(case = as.numeric(as.character(case))) %>%  # Convert factor to numeric
-    group_by(cluster_num, geoclass) %>%
-    summarize(sum_case = sum(case, na.rm = TRUE), 
-              n = n(), 
-              .groups = 'drop') %>%
+    group_by(cluster_num) %>%
+    summarize(
+      sum_case = sum(case, na.rm = TRUE), 
+      n = n(), 
+      .groups = 'drop'
+    ) %>%
     mutate(rate = ifelse(n > 0, sum_case / n * 100000, NA))  # Avoid divide by zero
   
   # Summarized statistics
@@ -158,14 +160,17 @@ calculate_prevalence <- function(df, filter_col, filter_val) {
   t_value <- qt(0.975, df = max(nrow(df_filtered) - 1, 1))  # T-distribution for CI
   ca_95LL <- ca_mean - (t_value * ca_se)
   ca_95UL <- ca_mean + (t_value * ca_se)
+  ca_denominator <- sum(df_filtered$n, na.rm = TRUE)  # Total denominator used for prevalence calculation
   
+  # Return results including denominator
   return(tibble(
     cases = ca_cases,
     mean_rate = ca_mean,
     stdev = ca_stdev,
     se = ca_se,
     ci_lower = ca_95LL,
-    ci_upper = ca_95UL
+    ci_upper = ca_95UL,
+    denominator = ca_denominator  # New column added
   ))
 }
 
@@ -201,16 +206,16 @@ prevalence_ca <- bind_rows(results) %>%
     se = round(se, 2),
     mean_rate = round(mean_rate, 2),
     ci_lower = round(ci_lower, 2),
-    ci_upper = round(ci_upper, 2)
+    ci_upper = round(ci_upper, 2),
+    denominator = round(denominator, 0)  # Round denominator for readability
   ) %>%
-  select(Group, cases, stdev, se, mean_rate, ci_lower, ci_upper) %>%  # Reorder columns
+  select(Group, cases, denominator, mean_rate, ci_lower, ci_upper) %>%  # Reorder columns
   rename(
     Cases = cases,
-    Standard_dev = stdev,
-    Standard_error = se,
+    Denominator = denominator,
     Prevalence = mean_rate,
     Lower_95 = ci_lower,
-    Upper_95 = ci_upper
+    Upper_95 = ci_upper,
   )
 
 
